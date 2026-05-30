@@ -1,0 +1,6 @@
+__pycache__
+log
+.vscode
+.DS_Store
+.build
+.swiftpm
