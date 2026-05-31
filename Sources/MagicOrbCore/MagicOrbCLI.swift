@@ -1,6 +1,31 @@
 import Darwin
 import Foundation
 
+private enum QuestionType: String, CaseIterable {
+    case ask = "/ask"
+    case search = "/search"
+    case peek = "/peek"
+}
+
+private typealias Questions = [QuestionType: [String]]
+
+private enum MagicOrbError: LocalizedError {
+    case invalidHTTPResponse
+    case apiRequestFailed(statusCode: Int, body: String)
+    case missingOutputText
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidHTTPResponse:
+            return "OpenAI API response was not an HTTP response."
+        case let .apiRequestFailed(statusCode, body):
+            return "OpenAI API request failed with status \(statusCode): \(body)"
+        case .missingOutputText:
+            return "OpenAI API response missing output_text."
+        }
+    }
+}
+
 public struct MagicOrbCLI {  
     private let apiKey: String
 
@@ -13,17 +38,32 @@ public struct MagicOrbCLI {
     }
 
     public func look(content: String) async throws -> String {
-        let request = try makeResponsesRequest(content: content)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let questions = extractQuestions(from: content)
+        var updatedContent = content
 
-        saveResponseLog(data)
-        try validate(response: response, data: data)
+        for questionType in QuestionType.allCases where questions[questionType]?.isEmpty == false {
+            let request: URLRequest
+            switch questionType {
+            case .ask:
+                request = try makeAskRequest(content: updatedContent)
+            case .search:
+                request = try makeSearchRequest(content: updatedContent)
+            case .peek:
+                request = try makePeekRequest(content: questions[.peek, default: []].joined(separator: "\n"))
+            }
 
-        let answers = try extractAskAnswers(from: data)
-        return replaceAskLines(in: content, with: answers)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            saveResponseLog(data)
+            try validate(response: response, data: data)
+
+            let answers = try extractAnswers(from: data, for: questionType)
+            updatedContent = replaceLines(in: updatedContent, for: questionType, with: answers)
+        }
+
+        return updatedContent
     }
 
-    private func makeResponsesRequest(content: String) throws -> URLRequest {
+    private func makeAskRequest(content: String) throws -> URLRequest {
         let modelName = "gpt-5.4-mini"
         let systemInstructions = """
             Look for each /ask command in the user's input.
@@ -51,9 +91,96 @@ public struct MagicOrbCLI {
                                 "items": [
                                     "type": "string"
                                 ]
-                            ]
+                            ],
                         ],
                         "required": ["ask"],
+                        "additionalProperties": false
+                    ],
+                    "strict": true
+                ]
+            ]
+        ])
+
+        return request
+    }
+
+    private func makePeekRequest(content: String) throws -> URLRequest {
+        let modelName = "gpt-5.5"
+        let systemInstructions = """
+            Look for each /peek command in the user's input.
+            Return one answer per /peek command in the response_format.peek array, in the same order.
+            Each answer must contain only replacement text for that /peek command.
+        """
+
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": modelName,
+            "instructions": systemInstructions,
+            "input": content,
+            "text": [
+                "format": [
+                    "type": "json_schema",
+                    "name": "response_format",
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "peek": [
+                                "type": "array",
+                                "items": [
+                                    "type": "string"
+                                ]
+                            ],
+                        ],
+                        "required": ["peek"],
+                        "additionalProperties": false
+                    ],
+                    "strict": true
+                ]
+            ]
+        ])
+
+        return request
+    }
+    
+    private func makeSearchRequest(content: String) throws -> URLRequest {
+        let modelName = "gpt-5.5"
+        let systemInstructions = """
+            Look for each /search command in the user's input.
+            Return one answer per /search command in the response_format.search array, in the same order.
+            Each answer must contain only replacement text for that /search command.
+        """
+
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": modelName,
+            "instructions": systemInstructions,
+            "input": content,
+            "tools": [
+                [
+                    "type": "web_search"
+                ]
+            ],
+            "text": [
+                "format": [
+                    "type": "json_schema",
+                    "name": "response_format",
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "search": [
+                                "type": "array",
+                                "items": [
+                                    "type": "string"
+                                ]
+                            ]
+                        ],
+                        "required": ["search"],
                         "additionalProperties": false
                     ],
                     "strict": true
@@ -75,7 +202,7 @@ public struct MagicOrbCLI {
         }
     }
 
-    private func extractAskAnswers(from data: Data) throws -> [String] {
+    private func extractAnswers(from data: Data, for questionType: QuestionType) throws -> [String] {
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let output = json["output"] as? [[String: Any]]
@@ -93,7 +220,7 @@ public struct MagicOrbCLI {
                     guard
                         let outputData = outputText.data(using: .utf8),
                         let responseJSON = try JSONSerialization.jsonObject(with: outputData) as? [String: Any],
-                        let answers = responseJSON["ask"] as? [String]
+                        let answers = responseJSON[String(questionType.rawValue.dropFirst())] as? [String]
                     else {
                         throw MagicOrbError.missingOutputText
                     }
@@ -106,12 +233,12 @@ public struct MagicOrbCLI {
         throw MagicOrbError.missingOutputText
     }
 
-    private func replaceAskLines(in content: String, with answers: [String]) -> String {
+    private func replaceLines(in content: String, for questionType: QuestionType, with answers: [String]) -> String {
         var answerIndex = 0
         let replacedLines = content.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
             let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard
-                trimmedLine == "/ask" || trimmedLine.hasPrefix("/ask "),
+                trimmedLine == questionType.rawValue || trimmedLine.hasPrefix(questionType.rawValue + " "),
                 answerIndex < answers.count
             else {
                 return String(line)
@@ -122,6 +249,23 @@ public struct MagicOrbCLI {
         }
 
         return replacedLines.joined(separator: "\n")
+    }
+
+    private func extractQuestions(from content: String) -> Questions {
+        var questions = Dictionary(uniqueKeysWithValues: QuestionType.allCases.map { ($0, [String]()) })
+
+        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let questionType = QuestionType.allCases.first(where: {
+                trimmedLine == $0.rawValue || trimmedLine.hasPrefix($0.rawValue + " ")
+            }) else {
+                continue
+            }
+
+            questions[questionType, default: []].append(String(line))
+        }
+
+        return questions
     }
 
     private func saveResponseLog(_ response: Data) {
@@ -159,22 +303,5 @@ public struct MagicOrbCLI {
             utc.tm_sec,
             now.tv_usec
         )
-    }
-}
-
-private enum MagicOrbError: LocalizedError {
-    case invalidHTTPResponse
-    case apiRequestFailed(statusCode: Int, body: String)
-    case missingOutputText
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidHTTPResponse:
-            return "OpenAI API response was not an HTTP response."
-        case let .apiRequestFailed(statusCode, body):
-            return "OpenAI API request failed with status \(statusCode): \(body)"
-        case .missingOutputText:
-            return "OpenAI API response missing output_text."
-        }
     }
 }
