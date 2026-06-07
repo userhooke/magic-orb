@@ -1,11 +1,15 @@
 # Magic Orb
 
-Magic Orb is a tiny Swift CLI that edits a text file in place by replacing
-question lines with answers from OpenAI.
+AI chat apps keep research conversations linear. That works for a single thread,
+but research often branches: one answer suggests several directions, one phrase
+needs a deeper follow-up, and later another part of the same answer becomes the
+next topic.
 
-It is built for lightweight "ask inside the document" workflows: write notes,
-drop in one or more prompts, run the CLI, and keep the generated
-answers in the file.
+Magic Orb is a tiny Swift CLI experiment in making that workflow more
+document-shaped. You can quote or keep a specific answer, add a question beside
+it, and expand that part without losing the surrounding context. The goal is a
+tree-like research flow: topics can branch into details while the source notes
+stay in one editable file.
 
 ## Example
 
@@ -14,13 +18,17 @@ Create a file:
 ```txt
 Project note
 
-/ask Summarize why SQLite is a good default for small local apps.
+<<<peek
+Summarize why SQLite is a good default for small local apps.
+peek>>>
 
-/search What is the latest stable Swift release?
+<<<search
+What is the latest stable Swift release?
+search>>>
 
-/peek Give me three title options for this note.
-
-/ask Give me three test cases for a CLI that rewrites files in place.
+<<<ask
+Give me three title options for this note.
+ask>>>
 ```
 
 Run Magic Orb:
@@ -29,8 +37,54 @@ Run Magic Orb:
 magic-orb notes.txt
 ```
 
-Magic Orb sends matching lines to OpenAI, gets one answer per question line, and
-rewrites the file with each question line replaced by its answer.
+Magic Orb sends matching blocks to OpenAI, gets one answer per question, and
+rewrites the file in place. It removes the `<<<ask`, `<<<search`, or `<<<peek`
+wrapper, keeps the original question text, and writes the answer below it.
+
+After running, the file looks like:
+
+```txt
+Project note
+
+Summarize why SQLite is a good default for small local apps.
+SQLite is a good default for small local apps because...
+
+What is the latest stable Swift release?
+The latest stable Swift release is...
+
+Give me three title options for this note.
+1. ...
+```
+
+### Question blocks
+
+```txt
+<<<ask Answer using the full current file context. ask>>>
+
+<<<ask
+Answer using the full current file context.
+ask>>>
+
+<<<search
+Research online before answering.
+search>>>
+
+<<<peek
+Answer only the block content, without full file context.
+peek>>>
+```
+
+### Rules
+
+- The target file must exist.
+- The file is read as UTF-8 text.
+- Matching blocks start with `<<<ask`, `<<<search`, or `<<<peek`.
+- Matching blocks may put question text on the opening line after the marker.
+- Matching blocks end with a typed marker: `ask>>>`, `search>>>`, or `peek>>>`.
+- Single-line blocks may use `<<<ask question ask>>>`.
+- Answers replace the matching question wrapper and are written below the
+  original question text.
+- Files are rewritten in place.
 
 ## Install
 
@@ -53,28 +107,6 @@ Or run through SwiftPM during development:
 ```sh
 swift run magic-orb notes.txt
 ```
-
-## Usage
-
-```sh
-magic-orb <file>
-```
-
-Question lines:
-
-```txt
-/ask       Answer using the full current file content with a fast, cheap model
-/search    Answer using the full current file content plus web search with a top, expensive model
-/peek      Answer using only the /peek question lines with a top, expensive model
-```
-
-Rules:
-
-- The target file must exist.
-- The file is read as UTF-8 text.
-- Matching lines are `/ask`, `/search`, `/peek`, or those commands followed by a space.
-- Answers replace the full matching line.
-- Files are rewritten in place.
 
 ## Environment
 
@@ -127,23 +159,6 @@ Run tests:
 swift test
 ```
 
-## Development
-
-Check `CONTRIBUTING.md` before changing code.
-
-Main entry point:
-
-```txt
-Sources/MagicOrb/main.swift
-```
-
-Core OpenAI request and file rewrite logic:
-
-```txt
-Sources/MagicOrbCore/MagicOrbCLI.swift
-```
-
 ## Status
 
-Early open source project. The current CLI surface is intentionally small:
-pass one file path and Magic Orb rewrites matching question lines in place.
+Early open source project.

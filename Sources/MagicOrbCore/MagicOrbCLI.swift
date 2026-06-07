@@ -1,14 +1,6 @@
 import Darwin
 import Foundation
 
-private enum QuestionType: String, CaseIterable {
-    case ask = "/ask"
-    case search = "/search"
-    case peek = "/peek"
-}
-
-private typealias Questions = [QuestionType: [String]]
-
 private enum MagicOrbError: LocalizedError {
     case invalidHTTPResponse
     case apiRequestFailed(statusCode: Int, body: String)
@@ -38,18 +30,18 @@ public struct MagicOrbCLI {
     }
 
     public func look(content: String) async throws -> String {
-        let questions = extractQuestions(from: content)
+        let questions = MagicOrbQuestionParser.extractQuestions(from: content)
         var updatedContent = content
 
         for questionType in QuestionType.allCases where questions[questionType]?.isEmpty == false {
             let request: URLRequest
             switch questionType {
+            case .peek:
+                request = try makePeekRequest(content: MagicOrbQuestionParser.questionBlocks(for: .peek, questions: questions))
+            case .search:
+                request = try makeSearchRequest(content: MagicOrbQuestionParser.questionBlocks(for: .search, questions: questions))
             case .ask:
                 request = try makeAskRequest(content: updatedContent)
-            case .search:
-                request = try makeSearchRequest(content: updatedContent)
-            case .peek:
-                request = try makePeekRequest(content: questions[.peek, default: []].joined(separator: "\n"))
             }
 
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -57,18 +49,18 @@ public struct MagicOrbCLI {
             try validate(response: response, data: data)
 
             let answers = try extractAnswers(from: data, for: questionType)
-            updatedContent = replaceLines(in: updatedContent, for: questionType, with: answers)
+            updatedContent = MagicOrbQuestionParser.replaceQuestionBlocks(in: updatedContent, for: questionType, with: answers)
         }
 
         return updatedContent
     }
 
     private func makeAskRequest(content: String) throws -> URLRequest {
-        let modelName = "gpt-5.4-mini"
+        let modelName = "gpt-5.5"
         let systemInstructions = """
-            Look for each /ask command in the user's input.
-            Return one answer per /ask command in the response_format.ask array, in the same order.
-            Each answer must contain only replacement text for that /ask command.
+            Look for each <<<ask ... ask>>> block in the user's input.
+            Return one answer per <<<ask ... ask>>> block in the response_format.ask array, in the same order.
+            Each answer must contain only replacement text for that <<<ask ... ask>>> block.
         """
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
@@ -105,11 +97,11 @@ public struct MagicOrbCLI {
     }
 
     private func makePeekRequest(content: String) throws -> URLRequest {
-        let modelName = "gpt-5.5"
+        let modelName = "gpt-5.4-mini"
         let systemInstructions = """
-            Look for each /peek command in the user's input.
-            Return one answer per /peek command in the response_format.peek array, in the same order.
-            Each answer must contain only replacement text for that /peek command.
+            Look for each <<<peek ... peek>>> block in the user's input.
+            Return one answer per <<<peek ... peek>>> block in the response_format.peek array, in the same order.
+            Each answer must contain only replacement text for that <<<peek ... peek>>> block.
         """
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
@@ -148,9 +140,9 @@ public struct MagicOrbCLI {
     private func makeSearchRequest(content: String) throws -> URLRequest {
         let modelName = "gpt-5.5"
         let systemInstructions = """
-            Look for each /search command in the user's input.
-            Return one answer per /search command in the response_format.search array, in the same order.
-            Each answer must contain only replacement text for that /search command.
+            Look for each <<<search ... search>>> block in the user's input.
+            Return one answer per <<<search ... search>>> block in the response_format.search array, in the same order.
+            Each answer must contain only replacement text for that <<<search ... search>>> block.
         """
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
@@ -220,7 +212,7 @@ public struct MagicOrbCLI {
                     guard
                         let outputData = outputText.data(using: .utf8),
                         let responseJSON = try JSONSerialization.jsonObject(with: outputData) as? [String: Any],
-                        let answers = responseJSON[String(questionType.rawValue.dropFirst())] as? [String]
+                        let answers = responseJSON[questionType.rawValue] as? [String]
                     else {
                         throw MagicOrbError.missingOutputText
                     }
@@ -231,41 +223,6 @@ public struct MagicOrbCLI {
         }
 
         throw MagicOrbError.missingOutputText
-    }
-
-    private func replaceLines(in content: String, for questionType: QuestionType, with answers: [String]) -> String {
-        var answerIndex = 0
-        let replacedLines = content.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard
-                trimmedLine == questionType.rawValue || trimmedLine.hasPrefix(questionType.rawValue + " "),
-                answerIndex < answers.count
-            else {
-                return String(line)
-            }
-
-            defer { answerIndex += 1 }
-            return answers[answerIndex]
-        }
-
-        return replacedLines.joined(separator: "\n")
-    }
-
-    private func extractQuestions(from content: String) -> Questions {
-        var questions = Dictionary(uniqueKeysWithValues: QuestionType.allCases.map { ($0, [String]()) })
-
-        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let questionType = QuestionType.allCases.first(where: {
-                trimmedLine == $0.rawValue || trimmedLine.hasPrefix($0.rawValue + " ")
-            }) else {
-                continue
-            }
-
-            questions[questionType, default: []].append(String(line))
-        }
-
-        return questions
     }
 
     private func saveResponseLog(_ response: Data) {
